@@ -1,6 +1,6 @@
 /*
 This program is designed to determine the capability of the cluster
-to identify the schedulable number of replicas/pods if provided with
+to identify the scheduleable number of replicas/pods if provided with
 a set of resources.
 
 It also follows the same kind of logic as is used by the kubernetes scheduler
@@ -10,7 +10,7 @@ re-writing others to create this package.
 
 Author: Abhishek Tamrakar(abhishek.tamrakar08@gmail.com)
 */
-// package main runs a set of functions to obtain the clusters currrnt
+// package main runs a set of functions to obtain the clusters current
 // capacity and remaining resources to calculate the maximum number of pods
 // it can spun successfully.
 package main
@@ -64,14 +64,14 @@ func main() {
 	var version bool
 	var legends bool
 
-	// read the kubeconfig file from program switch, if not availble from environment variable or default location.
+	// read the kubeconfig file from program switch, if not available from environment variable or default location.
 	if kubeConfigFile := getKubeConfig(); kubeConfigFile != "" {
 		kubeconfig = flag.String("kubeconfig", kubeConfigFile, "(optional) absolute path to the kubeconfig file")
 	} else {
 		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	}
 
-	// declare the flags and set teh defaults
+	// declare the flags and set the defaults
 	flag.StringVar(&cpuAsk, "cpureq", "100m", "amount of CPU you desire in m(milicores), use only string formatted interger for cores.")
 	flag.StringVar(&memoryAsk, "memreq", "1G", "amount of memory you desire in K(KB),M(MB),G(GB),T(TB)")
 	flag.StringVar(&cpuLimitAsk, "cpulimit", "100m", "amount of CPU you desire in m(milicores), use only string formatted interger for cores.")
@@ -81,7 +81,7 @@ func main() {
 	flag.BoolVar(&legends, "legends", false, "print legends and exit.")
 	flag.Parse()
 
-	// intialize tabwriter for formatted printing
+	// initialize tabwriter for formatted printing
 	w := new(tabwriter.Writer)
 	w.Init(os.Stdout, 0, 6, 3, ' ', tabwriter.AlignRight)
 
@@ -116,6 +116,8 @@ func main() {
 func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memoryAsk string, cpuLimitAsk string, memoryLimitAsk string, replicaAsk int) {
 
 	var header bool
+	var node int
+	var master int
 
 	namespaceList := make([]string, 0, 3)
 	// get list of namespaces
@@ -138,9 +140,10 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 	}
 
 	// initialize lists and maps
-	unHealthyNodes, temp := make([]string, 0, 3), "ok"
-	netReplicas, master, node, overcommittedNodes := int64(0), int64(0), int64(0), make([]string, 0, 3)
+	unHealthyNodes, temp, errorredPods := make([]string, 0, 3), "ok", 0
+	netReplicas, overcommittedNodes := int64(0), make([]string, 0, 3)
 	conditions := make(map[string]string)
+	undefinedCPUReq, undefinedCPULim, undefinedMemoryReq, undefinedMemoryLim := make([]string, 0, 3), make([]string, 0, 3), make([]string, 0, 3), make([]string, 0, 3)
 
 	// check for healthy nodes
 	for n := 0; n < len(nodes.Items); n++ {
@@ -150,7 +153,7 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 		}
 
 		/* A node is healthy if it is not under any pressure and posting a Ready status.
-		   Some of the status from Node Life cyle are;
+		   Some of the status from Node Life cycle are;
 		   1. Disk pressure
 		   2. Memory Pressure
 		   3. Cpu pressure
@@ -169,7 +172,7 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 			if nodes.Items[n].Labels["node-role.kubernetes.io/node"] == "true" {
 				node++
 				// get accumulated allocation of cpu and memory
-				cpuReq, cpuLimit, memoryReq, memoryLimit, totalPods := calculatePodResources(c, nodes.Items[n].Name, namespaceList)
+				cpuReq, cpuLimit, memoryReq, memoryLimit, totalPods, errorDict := calculatePodResources(c, nodes.Items[n].Name, namespaceList)
 
 				cap := nodes.Items[n].Status.Capacity
 				alloc := nodes.Items[n].Status.Allocatable
@@ -201,11 +204,11 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 					}
 				}
 
-				/* Once we get the number of spinnable pods per node, we should
-				determine if the requested number of replicas be achiveved in
+				/* Once we get the number of spinable pods per node, we should
+				determine if the requested number of replicas be achieved in
 				the cluster, assuming there is no port constraint.
 				*/
-				spinnable, overcommittedNode := calculateCapacity(strings.SplitAfterN(nodes.Items[n].Name, ".", 2)[0],
+				spinable, overcommittedNode := calculateCapacity(strings.SplitAfterN(nodes.Items[n].Name, ".", 2)[0],
 					nodeCPUCapacity,
 					nodeMemoryCapacity,
 					podCapacity,
@@ -226,11 +229,12 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 					cpuLimitAskPercentage,
 					w)
 
-				netReplicas = netReplicas + spinnable
+				netReplicas = netReplicas + spinable
 
 				if overcommittedNode != "nil" {
 					overcommittedNodes = append(overcommittedNodes, overcommittedNode)
 				}
+				undefinedCPUReq, undefinedCPULim, undefinedMemoryReq, undefinedMemoryLim = errorDict["undefinedCPUReq"], errorDict["undefinedCPULim"], errorDict["undefinedMemoryReq"], errorDict["undefinedMemoryLim"]
 			} else if nodes.Items[n].Labels["node-role.kubernetes.io/master"] == "true" || nodes.Items[n].Labels["node-role.kubernetes.io/master"] == "" {
 				master++
 			}
@@ -238,7 +242,18 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 			unHealthyNodes = append(unHealthyNodes, strings.SplitAfterN(nodes.Items[n].Name, ".", 2)[0])
 		}
 	}
-
+	if len(undefinedCPUReq) > 0 {
+		errorredPods += len(undefinedCPUReq)
+	}
+	if len(undefinedCPULim) > 0 {
+		errorredPods += len(undefinedCPULim)
+	}
+	if len(undefinedMemoryReq) > 0 {
+		errorredPods += len(undefinedMemoryReq)
+	}
+	if len(undefinedMemoryLim) > 0 {
+		errorredPods += len(undefinedMemoryLim)
+	}
 	Columns(w, "\n")
 	// if  there are no worker nodes, print a warning message. TODO: format this message properly.
 	if node == 0 {
@@ -251,9 +266,9 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 	Rows(w, "%s\t%s\t%s\t%s\n", "CPU Request via STDIN: ", cpuAsk, "CPU Limit via STDIN: ", cpuLimitAsk)
 
 	if netReplicas >= int64(replicaAsk) {
-		Rows(w, "%s\t%d\t%s\t%s\n", "Replica Requested via STDIN: ", replicaAsk, "Is Schedulable?: ", "True")
+		Rows(w, "%s\t%d\t%s\t%s\n", "Replica Requested via STDIN: ", replicaAsk, "Is Scheduleable?: ", "True")
 	} else {
-		Rows(w, "%s\t%d\t%s\t%s\n", "Replica Requested via STDIN: ", replicaAsk, "Is Schedulable?: ", "False")
+		Rows(w, "%s\t%d\t%s\t%s\n", "Replica Requested via STDIN: ", replicaAsk, "Is Scheduleable?: ", "False")
 	}
 
 	Columns(w, "\n")
@@ -264,15 +279,31 @@ func getNodeResources(w *tabwriter.Writer, c *k8s.Clientset, cpuAsk string, memo
 	Rows(w, "%s\t%d\t\n", "Unhealthy Nodes: ", len(unHealthyNodes))
 
 	Rows(w, "%s\t%s\t", "Unhealthy Nodes List: ", VPrint(unHealthyNodes))
+	Rows(w, "%s\t%d\t\n", "Total Pods With Undefined Resources: ", errorredPods)
+	Columns(w, "\n")
+
+	for _, req := range undefinedCPUReq {
+		Rows(w, "%s\t%s\t%s\t%s\t%s\n", "WARN! ", "Pod Name: ", req, "REASON: ", "CPU Requests must be defined")
+	}
+	for _, cpulim := range undefinedCPULim {
+		Rows(w, "%s\t%s\t%s\t%s\t%s\n", "WARN! ", "Pod Name: ", cpulim, "REASON: ", "CPU Requests Limits must be defined")
+	}
+	for _, memreq := range undefinedMemoryReq {
+		Rows(w, "%s\t%s\t%s\t%s\t%s\n", "WARN! ", "Pod Name: ", memreq, "REASON: ", "Memory Requests must be defined")
+	}
+	for _, memlim := range undefinedMemoryLim {
+		Rows(w, "%s\t%s\t%s\t%s\t%s\n", "WARN! ", "Pod Name: ", memlim, "REASON: ", "Memory Limits must be defined")
+	}
 	Columns(w, "\n")
 	w.Flush()
 }
 
-// calculatePodResources calculates resources currentky consumed by each pod.
-func calculatePodResources(c *k8s.Clientset, nodeName string, nsList []string) (int64, int64, int64, int64, int) {
+// calculatePodResources calculates resources currently consumed by each pod.
+func calculatePodResources(c *k8s.Clientset, nodeName string, nsList []string) (int64, int64, int64, int64, int, map[string][]string) {
 
 	var podLength int
 	podLength = 0
+	errorMap := make(map[string][]string)
 
 	// set condition to identify the non terminted pods, based on the Pods Life Cycle
 	fieldSelector, err := fields.ParseSelector("spec.nodeName=" + nodeName + ",status.phase!=" + "Pending" + ",status.phase!=" + "Succeeded" + ",status.phase!=" + "Failed" + ",status.phase!=" + "Unknown")
@@ -291,12 +322,28 @@ func calculatePodResources(c *k8s.Clientset, nodeName string, nsList []string) (
 			panic(err.Error())
 		}
 		for _, p := range pods.Items {
+			podName := string(p.Name)
 			for _, container := range p.Spec.Containers {
 				// get limits and requests and sum them up
 				request = container.Resources.Requests.Cpu().MilliValue()
 				memory := container.Resources.Requests.Memory().Value()
 				reqlimit = container.Resources.Limits.Cpu().MilliValue()
 				memlimit := container.Resources.Limits.Memory().Value()
+
+				if nsList[s] != "kube-system" && nsList[s] != "ingress-nginx" && nsList[s] != "kubernetes-dashboard" {
+					if request == 0 {
+						errorMap["undefinedCPUReq"] = append(errorMap["undefinedCPUReq"], podName)
+					}
+					if reqlimit == 0 {
+						errorMap["undefinedCPULim"] = append(errorMap["undefinedCPULim"], podName)
+					}
+					if memory == 0 {
+						errorMap["undefinedMemoryReq"] = append(errorMap["undefinedMemoryReq"], podName)
+					}
+					if memlimit == 0 {
+						errorMap["undefinedMemoryLim"] = append(errorMap["undefinedMemoryLim"], podName)
+					}
+				}
 
 				cpureq += request
 				memoryreq += memory
@@ -307,14 +354,14 @@ func calculatePodResources(c *k8s.Clientset, nodeName string, nsList []string) (
 		}
 	}
 
-	return cpureq, cpulimit, memoryreq, memorylimit, podLength
+	return cpureq, cpulimit, memoryreq, memorylimit, podLength, errorMap
 }
 
 // cpuToInt64 converts string data to integer to represents CPU units in milicores
 func cpuToInt64(data string) int64 {
 	/*
 	  This function is taken from bytes.go and modified to behave
-	  as needed for our requoirement, here we handle the input given
+	  as needed for our requirement, here we handle the input given
 	  in milicores or cores.
 	*/
 
@@ -374,7 +421,7 @@ func ToBytes(s string) int64 {
 	}
 }
 
-// calculateCapacity calculates current usage and maximum number of spinnable pods per node and return
+// calculateCapacity calculates current usage and maximum number of spinable pods per node and return
 func calculateCapacity(node string,
 	nodeCPUCapacity int64,
 	nodeMemoryCapacity int64,
@@ -401,25 +448,25 @@ func calculateCapacity(node string,
 	fractionNODECPULimit := float64(cpuLimit) / float64(nodeCPUAllocatable) * 100
 	fractionNodeMemoryLimit := float64(memoryLimit) / float64(nodeMemoryAllocatable) * 100
 
-	spinnable, cpuCrunch, memoryCrunch := IsSpinnable(remainingCPUReq, remainingMemoryReq, cpuAsk, memoryAsk, replicaAsk, podAllocatable)
+	spinable, cpuCrunch, memoryCrunch := Isspinable(remainingCPUReq, remainingMemoryReq, cpuAsk, memoryAsk, replicaAsk, podAllocatable)
 
-	if spinnable == podAllocatable {
-		spinnable = spinnable - int64(totalPods)
+	if spinable == podAllocatable {
+		spinable = spinable - int64(totalPods)
 	}
 
-	Rows(p, "%2s\t%4.2f%%\t%4.2f%%\t%6.2f%%\t%7.2f%%\t%5d\t%11t\t%10t\t%6d\t\n", node, fractionNODECPUReq, fractionNodeMemoryReq, fractionNODECPULimit, fractionNodeMemoryLimit, totalPods, cpuCrunch, memoryCrunch, spinnable)
+	Rows(p, "%2s\t%4.2f%%\t%4.2f%%\t%6.2f%%\t%7.2f%%\t%5d\t%11t\t%10t\t%6d\t\n", node, fractionNODECPUReq, fractionNodeMemoryReq, fractionNODECPULimit, fractionNodeMemoryLimit, totalPods, cpuCrunch, memoryCrunch, spinable)
 
 	if memoryLimitAskPercentage > 110 || cpuLimitAskPercentage > 100 || int64(fractionNODECPULimit) > 110 || int64(fractionNodeMemoryLimit) > 100 {
-		return spinnable, node
+		return spinable, node
 	}
 
-	return spinnable, "nil"
+	return spinable, "nil"
 }
 
-// IsSpinnable Test how many more pods can be spun with same resources given, per node.
+// Isspinable Test how many more pods can be spun with same resources given, per node.
 // it calculates the remaining resources out of the fetched information.
 // it also helps in calculating the number of maximum pods that can be spun with the remaining resources.
-func IsSpinnable(remainingCPUReq int64, remainingMemoryReq int64, cpuAsk int64, memoryAsk int64, replicaAsk int, podAllocatable int64) (int64, bool, bool) {
+func Isspinable(remainingCPUReq int64, remainingMemoryReq int64, cpuAsk int64, memoryAsk int64, replicaAsk int, podAllocatable int64) (int64, bool, bool) {
 
 	/*
 	  We should be good if:
@@ -478,9 +525,9 @@ func Rows(p *tabwriter.Writer, format string, out ...interface{}) {
 func printHeader(p *tabwriter.Writer) bool {
 	Columns(p, "\n")
 	Rows(p, "%-2s\n", "  +-------------------------------------------------------------------------------------------------+")
-	Rows(p, "%40s\t%50s\n", "Current Capacity Usage Per Node", "Spinnable Pods")
+	Rows(p, "%40s\t%50s\n", "Current Capacity Usage Per Node", "spinable Pods")
 	Rows(p, "%-2s\n", "  +-------------------------------------------------------------------------------------------------+")
-	Rows(p, "%-11s\t%-5s\t%-5s\t%-5s\t%-5s\t%-5s |\t%-5s\t%-5s\t%-5s\t\n", "Node", "CpuReq", "MemReq", "CpuLimit", "MemLimit", "Pods", "CpuCrunch", "MemCrunch", "Spinnable")
+	Rows(p, "%-11s\t%-5s\t%-5s\t%-5s\t%-5s\t%-5s |\t%-5s\t%-5s\t%-5s\t\n", "Node", "CpuReq", "MemReq", "CpuLimit", "MemLimit", "Pods", "CpuCrunch", "MemCrunch", "spinable")
 	Rows(p, "%-2s\n", "  +-------------------------------------------------------------------------------------------------+")
 	p.Flush()
 
@@ -509,15 +556,15 @@ func printLegends(p *tabwriter.Writer) {
 	Columns(p, "\n")
 	Rows(p, "%s\t\n", "+++++++ Legends +++++++")
 	Columns(p, "\n")
-	Rows(p, "%s\t%s\n", "Is Schedulable?: ", "if 'true', Pods can be spun on worker node with the amount of CPU and Memory requested. False, otherwise.")
+	Rows(p, "%s\t%s\n", "Is Scheduleable?: ", "if 'true', Pods can be spun on worker node with the amount of CPU and Memory requested. False, otherwise.")
 	Rows(p, "%s\t%s\n", "Overcommitted Nodes List: ", "List of nodes which will OverCommit CPu/Memory Limits with the amount of CPU and Memory requested.")
 	Rows(p, "%s\t%s\n", "Unhealthy Nodes List: ", "List of nodes which are not healthy or which reached either disk/memory/cpu load.")
 	Columns(p, "\n")
-	Rows(p, "%s\t\n", "Understanding Spinnable Pods")
+	Rows(p, "%s\t\n", "Understanding spinable Pods")
 	Rows(p, "%-2s\n", "  +----------------------------------------------+")
 	Rows(p, "%s\t%s\n", "CpuCrunch: ", "if 'true', amount of CPU requested is not available on the worker node.")
 	Rows(p, "%s\t%s\n", "MemCrunch: ", "if 'true', amount of Memory requested is not available on the worker node.")
-	Rows(p, "%s\t%s\n", "Spinnable: ", "maximum number of pods that can be spun on worker node with the amount of CPU and Memory requested.")
+	Rows(p, "%s\t%s\n", "spinable: ", "maximum number of pods that can be spun on worker node with the amount of CPU and Memory requested.")
 	Columns(p, "\n")
 	p.Flush()
 	Rows(p, "%s\t\n", "Understanding Current Capacity Usage Per Node")
