@@ -20,7 +20,7 @@ options:
     
 -kubeconfig string
 
-    (optional) absolute path to the kubeconfig file (default "/home/ankita/.kube/config")
+    (optional) absolute path to the kubeconfig file (default "/home/tamrakar/.kube/config")
     
 -legends
 
